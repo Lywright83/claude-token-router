@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+*.skill
+
+# usage logs — may contain task text from your prompts. Do not commit.
+*.jsonl
+demo_usage.jsonl

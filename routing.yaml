@@ -1,0 +1,256 @@
+# routing.yaml — Claude token router configuration
+# Edit this to retune routing without touching router.py.
+# Verify pricing against the official pricing page before trusting cost output.
+
+version: 1
+updated: 2026-06-29
+
+# ---------------------------------------------------------------------------
+# Models: ids, per-MTok pricing, and cache/batch multipliers.
+# All prices USD per million tokens. Output is 5x input on every current tier.
+# ---------------------------------------------------------------------------
+models:
+  haiku:
+    id: claude-haiku-4-5
+    input_per_mtok: 1.00
+    output_per_mtok: 5.00
+    context_tokens: 200000
+
+  sonnet:
+    # Current default. NOTE: introductory pricing is $2/$10 through 2026-08-31,
+    # reverting to $3/$15 on 2026-09-01. We hardcode the STANDARD rate on
+    # purpose so budgets don't silently blow out in September. If you want the
+    # intro rate reflected, see `intro_pricing` below and flip it deliberately.
+    id: claude-sonnet-5
+    input_per_mtok: 3.00
+    output_per_mtok: 15.00
+    context_tokens: 1000000
+    intro_pricing:
+      input_per_mtok: 2.00
+      output_per_mtok: 10.00
+      expires: 2026-08-31
+    # Sonnet 5 uses a NEW TOKENIZER: 1.0-1.35x more tokens for the same text.
+    # Re-benchmark cache-hit rates and token counts before migrating cached
+    # prefix workloads onto it. See references/integration.md.
+    tokenizer_note: new_tokenizer_1.0x_to_1.35x
+
+  sonnet_4_6:
+    # Pinned fallback. Old tokenizer, known-stable token counts.
+    id: claude-sonnet-4-6
+    input_per_mtok: 3.00
+    output_per_mtok: 15.00
+    context_tokens: 1000000
+
+  opus:
+    id: claude-opus-4-8
+    input_per_mtok: 5.00
+    output_per_mtok: 25.00
+    context_tokens: 1000000
+
+  fable:
+    # Top tier. Access restored 2026-07-01 after the June 12-30 export-control
+    # suspension was lifted. Publicly available. 2x Opus 4.8 on input.
+    # Reserve for work where the extra capability materially changes the result;
+    # at $10/$50 a misroute here is the single most expensive mistake the
+    # router can make.
+    id: claude-fable-5
+    input_per_mtok: 10.00
+    output_per_mtok: 50.00
+    context_tokens: 1000000
+    # Mythos 5 shares the same underlying model but is NOT publicly available
+    # (trusted-access only, Project Glasswing). Do not route to it by default.
+
+# Multipliers applied to base input price. These stack with batch.
+multipliers:
+  cache_read: 0.10      # cache hit: 90% off input
+  cache_write_5m: 1.25  # 5-minute TTL write
+  cache_write_1h: 2.00  # 1-hour TTL write
+  batch: 0.50           # 50% off input AND output, async (<=24h)
+
+# Escalation order. Router walks up this ladder on failed validation.
+# fable sits above opus. Escalation is capped by escalation.max_escalations
+# (default 1), so a haiku task will NOT silently walk all the way to fable —
+# that would be an expensive surprise. Fable is normally reached by explicit
+# routing (signals / role), not by escalation drift.
+tier_order: [haiku, sonnet, opus, fable]
+
+# ---------------------------------------------------------------------------
+# Routing rules. The classifier scores a task against these and picks a tier.
+# 'signals' are substrings/keywords matched case-insensitively against the
+# task descriptor. First tier whose signals match (checked low->high) wins,
+# unless an 'escalate_if' condition fires. Tune freely.
+# ---------------------------------------------------------------------------
+rules:
+  haiku:
+    description: Deterministic, pattern-based, low-ambiguity work.
+    signals:
+      - extract
+      - parse
+      - regex
+      - reformat
+      - convert
+      - json to
+      - yaml
+      - classify
+      - tag
+      - label
+      - validate
+      - lint
+      - summarize
+      - dedupe
+      - filter
+      - normalize
+    use_for:
+      - log/field extraction
+      - format conversion
+      - clear-label classification
+      - syntax/schema validation
+      - high-volume swarm worker subtasks
+
+  sonnet:
+    description: Applied reasoning with a known approach. The default workhorse.
+    signals:
+      - write
+      - code
+      - endpoint
+      - function
+      - script
+      - implement
+      - debug
+      - fix
+      - refactor
+      - build
+      - generate
+      - query
+      - map to
+      - draft
+      - email
+      - rewrite
+      - explain
+      - orchestrate
+      - synthesize
+      - lab
+      - step-by-step
+    use_for:
+      - code generation and debugging
+      - multi-step instructions
+      - query/rule writing
+      - standard professional writing
+      - agent orchestration and tool loops
+      - few-source research synthesis
+
+  opus:
+    description: Novel design, adversarial reasoning, or high-stakes correctness.
+    signals:
+      - architect
+      - design from scratch
+      - novel
+      - strategy
+      - adversarial
+      - red team
+      - tradeoff
+      - compliance
+      - high stakes
+      - critical
+      - review before ship
+      - final review
+      - reason about
+      - prove
+    use_for:
+      - system design from scratch
+      - adversarial/creative reasoning
+      - multi-framework tradeoff reasoning
+      - expensive-if-wrong decisions
+      - final review of lower-tier output
+
+  fable:
+    description: >
+      Frontier tier ($10/$50 — 2x Opus input, 2x Opus output). Only for work
+      where the extra capability materially changes the OUTCOME, not merely the
+      polish. If an Opus retry would plausibly get there, use Opus. Requires an
+      explicit signal or role; never the default.
+    signals:
+      - fable
+      - frontier
+      - hardest
+      - deepest reasoning
+      - long-horizon
+      - flagship
+      - escalate to fable
+      - highest tier
+    use_for:
+      - long-horizon autonomous agent runs where drift is costly
+      - genuinely novel research/architecture with no known approach
+      - final gate on decisions that are expensive and irreversible
+    guardrail: >
+      A misroute here is the most expensive mistake the router can make.
+      Log every fable call. If a fable call would not have changed the decision
+      versus opus, that is a routing bug — tighten these signals.
+
+# Default when nothing matches confidently.
+default_tier: sonnet
+
+# ---------------------------------------------------------------------------
+# Escalation: confidence-gated retry. After a call, the caller reports a
+# validation result and/or a confidence score. If validation fails or
+# confidence < threshold, the router escalates one tier and retries.
+# ---------------------------------------------------------------------------
+escalation:
+  enabled: true
+  max_escalations: 1          # one retry up the ladder; raise with caution
+  confidence_threshold: 0.6   # below this -> escalate
+  # If a task already routes to opus, there is no higher tier; it returns as-is.
+
+# ---------------------------------------------------------------------------
+# Caching policy. The router builds a cached prefix block from these parts.
+# Anything listed here should be byte-stable across calls or the cache misses.
+# ---------------------------------------------------------------------------
+caching:
+  enabled: true
+  ttl: 5m                      # 5m for tight loops; 1h for long-lived context
+  cache_parts:                 # logical names; caller supplies the actual text
+    - system_prompt
+    - tool_definitions
+    - persistent_context       # scope files, standing instructions
+  min_cacheable_tokens: 1024   # below this, caching write overhead isn't worth it
+
+# ---------------------------------------------------------------------------
+# Batch policy. Route eligible work async for 50% off. Stacks with caching.
+# ---------------------------------------------------------------------------
+batch:
+  enabled: true
+  # Task descriptors matching these are batch-eligible (latency-tolerant).
+  eligible_signals:
+    - nightly
+    - backfill
+    - bulk
+    - batch
+    - report
+    - sweep
+    - offline
+    - async
+  max_latency_ok_hours: 24
+
+# ---------------------------------------------------------------------------
+# Swarm policy. Role-based overrides for multi-agent setups.
+# ---------------------------------------------------------------------------
+swarm:
+  roles:
+    planner: opus         # or sonnet for cheaper orchestration
+    orchestrator: sonnet
+    worker: haiku         # repetitive fan-out grunts
+    reviewer: opus        # final-pass quality gate
+    final_arbiter: fable  # ONLY for irreversible/expensive calls. Use sparingly.
+
+# ---------------------------------------------------------------------------
+# Cost guardrails. Fable is 10x haiku on input and 10x on output — a runaway
+# loop here is the failure mode that actually hurts. These are advisory limits
+# the router surfaces; enforce them in your orchestrator.
+# ---------------------------------------------------------------------------
+cost_guards:
+  # Warn if a single call's estimated cost exceeds this (USD).
+  warn_above_usd_per_call: 0.50
+  # Hard-stop tiers that should never be reached by escalation drift alone.
+  require_explicit_routing: [fable]
+  # Log every call at these tiers for later audit.
+  audit_tiers: [opus, fable]
