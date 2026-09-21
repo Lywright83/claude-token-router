@@ -189,16 +189,20 @@ class Router:
         cache_ttl: str = "5m",
         batch: bool = False,
     ) -> CostEstimate:
-        """Estimate USD cost for one call. cached_input_tokens read from cache
-        at 0.1x; cache_write_tokens billed at the write multiplier once."""
+        """Estimate USD cost for one call. cached_input_tokens are billed at
+        the model's cache-read rate (0.1x base input for most models, 0.025x
+        on Fable 5.1); cache_write_tokens billed at the write multiplier once."""
         m = self.models[tier]
         in_rate = m["input_per_mtok"] / 1_000_000
         out_rate = m["output_per_mtok"] / 1_000_000
         batch_mult = self.mult["batch"] if batch else 1.0
+        # Cache-read rate is per-model: most models read at 0.1x base input,
+        # but Fable 5.1 reads at 0.025x ($0.25/MTok). Fall back to the global.
+        cache_read_mult = m.get("cache_read_mult", self.mult["cache_read"])
 
         fresh_in = max(0, input_tokens - cached_input_tokens)
         input_cost = fresh_in * in_rate * batch_mult
-        cache_read_cost = cached_input_tokens * in_rate * self.mult["cache_read"] * batch_mult
+        cache_read_cost = cached_input_tokens * in_rate * cache_read_mult * batch_mult
         write_mult = self.mult["cache_write_1h"] if cache_ttl == "1h" else self.mult["cache_write_5m"]
         cache_write_cost = cache_write_tokens * in_rate * write_mult  # writes not batch-discounted
         output_cost = output_tokens * out_rate * batch_mult
@@ -208,7 +212,7 @@ class Router:
         if batch:
             notes.append("batch 50% off")
         if cached_input_tokens:
-            notes.append(f"{cached_input_tokens} tok cache-read @0.1x")
+            notes.append(f"{cached_input_tokens} tok cache-read @{cache_read_mult:g}x")
 
         # Cost guard: flag calls above the configured per-call ceiling. Fable at
         # $10/$50 makes this worth surfacing before you send, not after.

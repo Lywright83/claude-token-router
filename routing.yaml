@@ -2,12 +2,17 @@
 # Edit this to retune routing without touching router.py.
 # Verify pricing against the official pricing page before trusting cost output.
 
-version: 1
-updated: 2026-06-29
+version: 2
+updated: 2026-09-21
+# Verified 2026-09-21 against platform.claude.com models overview + Sonnet 5
+# pricing announcement. Three corrections vs v1 (see CHANGELOG at end of file).
 
 # ---------------------------------------------------------------------------
 # Models: ids, per-MTok pricing, and cache/batch multipliers.
-# All prices USD per million tokens. Output is 5x input on every current tier.
+# All prices USD per million tokens.
+# NOTE: output is 5x input on every current tier EXCEPT Sonnet 5 ($2/$10 is
+# also 5x — still holds). Do not assume the ratio when adding a model; look it
+# up. `cache_read_mult` overrides the global multiplier per model.
 # ---------------------------------------------------------------------------
 models:
   haiku:
@@ -15,54 +20,96 @@ models:
     input_per_mtok: 1.00
     output_per_mtok: 5.00
     context_tokens: 200000
+    max_output_tokens: 64000
+    # Haiku 4.5 does NOT support output_config.effort — passing it errors.
+    # It also still uses OLD-STYLE extended thinking (thinking.budget_tokens),
+    # not adaptive thinking. Do not copy Opus/Sonnet request shapes onto it.
+    effort_supported: false
+    thinking_mode: extended_budget_tokens
 
   sonnet:
-    # Current default. NOTE: introductory pricing is $2/$10 through 2026-08-31,
-    # reverting to $3/$15 on 2026-09-01. We hardcode the STANDARD rate on
-    # purpose so budgets don't silently blow out in September. If you want the
-    # intro rate reflected, see `intro_pricing` below and flip it deliberately.
+    # $2/$10 is the PERMANENT rate. The scheduled 2026-09-01 reversion to
+    # $3/$15 was CANCELLED on 2026-08-10 — introductory pricing was made
+    # standard. v1 of this file hardcoded $3/$15 defensively against that
+    # reversion; that defense is now obsolete and overstated Sonnet by 50%.
     id: claude-sonnet-5
-    input_per_mtok: 3.00
-    output_per_mtok: 15.00
+    input_per_mtok: 2.00
+    output_per_mtok: 10.00
     context_tokens: 1000000
-    intro_pricing:
-      input_per_mtok: 2.00
-      output_per_mtok: 10.00
-      expires: 2026-08-31
+    max_output_tokens: 128000
+    effort_supported: true      # low|medium|high|xhigh|max, default high
+    thinking_mode: adaptive
     # Sonnet 5 uses a NEW TOKENIZER: 1.0-1.35x more tokens for the same text.
     # Re-benchmark cache-hit rates and token counts before migrating cached
     # prefix workloads onto it. See references/integration.md.
     tokenizer_note: new_tokenizer_1.0x_to_1.35x
 
   sonnet_4_6:
-    # Pinned fallback. Old tokenizer, known-stable token counts.
+    # LEGACY pin. Old tokenizer, known-stable token counts. Note it is now
+    # MORE expensive than Sonnet 5 ($3/$15 vs $2/$10) — pin it only for
+    # token-count stability, never for cost.
     id: claude-sonnet-4-6
     input_per_mtok: 3.00
     output_per_mtok: 15.00
     context_tokens: 1000000
+    status: legacy
 
   opus:
+    # Was claude-opus-4-8 in v1. Opus 5 is the current Opus-tier model at the
+    # SAME price, so this retarget changes no cost math — only the model ID.
+    id: claude-opus-5
+    input_per_mtok: 5.00
+    output_per_mtok: 25.00
+    context_tokens: 1000000
+    max_output_tokens: 128000
+    effort_supported: true      # low|medium|high|xhigh|max, default high
+    thinking_mode: adaptive     # ON BY DEFAULT (unlike Opus 4.8/4.7)
+    # Fast mode (speed:"fast", beta) reprices Opus 5 to $10/$50 — 2x. It is
+    # NOT modelled here. If you enable it, you are paying Fable rates.
+
+  opus_4_8:
+    # LEGACY pin — the v1 opus target. Same price as Opus 5.
     id: claude-opus-4-8
     input_per_mtok: 5.00
     output_per_mtok: 25.00
     context_tokens: 1000000
+    status: legacy
 
   fable:
-    # Top tier. Access restored 2026-07-01 after the June 12-30 export-control
-    # suspension was lifted. Publicly available. 2x Opus 4.8 on input.
-    # Reserve for work where the extra capability materially changes the result;
-    # at $10/$50 a misroute here is the single most expensive mistake the
-    # router can make.
+    # Frontier tier. Retargeted from claude-fable-5 to claude-fable-5-1 (the
+    # current frontier model) at the SAME per-token price.
+    # Reserve for work where the extra capability materially changes the
+    # OUTCOME; at $10/$50 a misroute here is the single most expensive
+    # mistake the router can make.
+    id: claude-fable-5-1
+    input_per_mtok: 10.00
+    output_per_mtok: 50.00
+    context_tokens: 1000000
+    max_output_tokens: 128000
+    # Cache reads on Fable 5.1 are 2.5% of base input ($0.25/MTok), NOT the
+    # usual 10%. The global multiplier would overstate this by 4x.
+    cache_read_mult: 0.025
+    thinking_mode: always_on    # omit `thinking`; explicit config returns 400
+    # API differences that will break a shared request builder:
+    #   - forced tool_choice ("any"/"tool") returns 400 — use "auto"
+    #   - no assistant prefill
+    #   - requires 30-day retention; ZDR orgs get 400 unless authorized
+    #   - no Priority Tier
+    # Mythos 5.1 shares the model but is trusted-access only (Project
+    # Glasswing). Do not route to it by default.
+
+  fable_5:
+    # LEGACY pin. Standard 10% cache reads, unlike 5.1.
     id: claude-fable-5
     input_per_mtok: 10.00
     output_per_mtok: 50.00
     context_tokens: 1000000
-    # Mythos 5 shares the same underlying model but is NOT publicly available
-    # (trusted-access only, Project Glasswing). Do not route to it by default.
+    status: legacy
 
 # Multipliers applied to base input price. These stack with batch.
+# A model may override cache_read via its own `cache_read_mult` (Fable 5.1).
 multipliers:
-  cache_read: 0.10      # cache hit: 90% off input
+  cache_read: 0.10      # cache hit: 90% off input (default; per-model override)
   cache_write_5m: 1.25  # 5-minute TTL write
   cache_write_1h: 2.00  # 1-hour TTL write
   batch: 0.50           # 50% off input AND output, async (<=24h)
@@ -254,3 +301,67 @@ cost_guards:
   require_explicit_routing: [fable]
   # Log every call at these tiers for later audit.
   audit_tiers: [opus, fable]
+
+# ---------------------------------------------------------------------------
+# Effort — the first quality-trading lever AFTER caching, and cheaper to reach
+# for than a tier change. Not modelled in router.py's cost estimate (effort
+# changes token VOLUME, not per-token price), but it belongs in the routing
+# decision: the newest model at LOW effort often beats a prior-generation
+# model at HIGH effort, for one cache namespace instead of two.
+# Haiku 4.5 does not support effort at all.
+# ---------------------------------------------------------------------------
+effort:
+  default: high          # matches the API default on Opus 5 / Sonnet 5 / Fable
+  by_role:
+    worker: low          # subagents, bulk extraction, simple fan-out
+    orchestrator: medium
+    planner: high
+    reviewer: xhigh      # best setting for most coding/agentic work
+    final_arbiter: max   # correctness matters more than cost
+  guidance: >
+    Measure before raising a default — effort repays strongly on coding and
+    long-horizon agentic work, and often not at all on chat, classification,
+    or high-volume latency-sensitive routes. Tune per route, not globally.
+    Judge cost per COMPLETED TASK, not per request: a cheaper call that needs
+    more turns to finish the job is not cheaper.
+
+# ---------------------------------------------------------------------------
+# Cache-namespace warning. This is a structural cost of tier routing itself
+# and the single most important caveat in this file.
+# ---------------------------------------------------------------------------
+cache_namespace:
+  # Prompt caches are MODEL-SCOPED. Every tier hop is a guaranteed cache miss
+  # on the shared prefix — the routed call pays full input price to rebuild a
+  # prefix the previous tier already had cached.
+  model_scoped: true
+  warning: >
+    A multi-model cascade FORFEITS cache reuse across its models. On an
+    input-heavy agent loop, the cache you lose by hopping tiers can exceed
+    the per-token spread you gained by hopping. Before adding a tier hop to
+    save money, measure the simpler alternative first: ONE model at lower
+    effort, keeping a single warm cache namespace.
+    Corollary: a mid-conversation top-level `effort` change also invalidates
+    the messages cache. On Opus 5 / Fable 5.1, use the per-message effort
+    system message to change effort WITHOUT a cache reset.
+  # Check this before trusting any savings number from cost_report.py.
+  verify_with: usage.cache_read_input_tokens
+
+# ---------------------------------------------------------------------------
+# CHANGELOG
+# ---------------------------------------------------------------------------
+# v2 (2026-09-21) — verified against platform.claude.com. Corrections:
+#   1. sonnet: $3/$15 -> $2/$10. The 2026-09-01 reversion was cancelled
+#      2026-08-10; intro pricing became permanent. v1 overstated every
+#      Sonnet estimate by 50% and made Haiku look 3x cheaper than Sonnet
+#      when the real gap is 2x.
+#   2. opus: claude-opus-4-8 -> claude-opus-5 (same price, current model).
+#      fable: claude-fable-5 -> claude-fable-5-1 (same price). Legacy IDs
+#      retained as pins.
+#   3. fable cache reads are 0.025x, not 0.10x. Added per-model
+#      `cache_read_mult`, honored in router.py estimate_cost().
+#   Added: effort block, cache_namespace warning, per-model effort/thinking
+#   capability flags (Haiku 4.5 supports neither effort nor adaptive thinking).
+# NOT retuned: tier signal lists. The haiku/sonnet economics changed (3x -> 2x)
+#   which likely means some haiku-routed work should move up, but that is a
+#   measurement question — run cost_report.py against real traffic and retune
+#   from escalation rates, not from this note.
