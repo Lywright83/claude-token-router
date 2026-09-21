@@ -14,9 +14,9 @@ A model-picking router optimizes *which model* a task goes to. But in an agent l
 
 Cost levers, in order of actual impact:
 
-1. **Prompt caching** — cache reads cost 0.1x base input. Biggest win for agent loops.
+1. **Prompt caching** — cache reads cost 0.1x base input (0.025x on Fable 5.1). Biggest win for agent loops. Caches are **model-scoped**, so every tier hop is a guaranteed cache miss — price that loss before routing across tiers to save money.
 2. **Context discipline** — don't stuff full history into every subagent.
-3. **Tier routing** — the 5–10x spread between Haiku and the top tiers.
+3. **Tier routing** — the 5–10x spread between Haiku and the top tiers. (Haiku→Sonnet is only 2x; don't push marginal work down on reflex.)
 4. **Batch API** — 50% off async work. Stacks with caching.
 5. **Confidence-gated escalation** — catches misroutes cheaply.
 

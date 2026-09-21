@@ -11,7 +11,7 @@ A routing layer that picks the cheapest Claude model that can do each task corre
 
 The router optimizes *which model* a task goes to. But for an agent stack, model choice is usually the **smaller** cost variable. The dominant drivers, in order of impact:
 
-1. **Prompt caching** — repeated system prompts, tool schemas, scope files, and context re-sent every turn. Cache reads cost 0.1x base input (90% off). This is almost always the biggest single win for an agent loop, because those loops are input-token-heavy.
+1. **Prompt caching** — repeated system prompts, tool schemas, scope files, and context re-sent every turn. Cache reads cost 0.1x base input (90% off; **0.025x on Fable 5.1**). This is almost always the biggest single win for an agent loop, because those loops are input-token-heavy. Note caches are **model-scoped**, so every tier hop is a guaranteed cache miss — see the cache-namespace warning below.
 2. **Context discipline** — don't stuff full history into every subagent. Pass summarized state, not raw transcripts.
 3. **Tier routing** — the 5x spread between Haiku ($1/$5) and Opus ($5/$25) per MTok. Real, but secondary to the above.
 4. **Batch API** — 50% off for anything async. Stacks with caching.
@@ -19,25 +19,34 @@ The router optimizes *which model* a task goes to. But for an agent stack, model
 
 A router layered on an uncached, context-bloated swarm underdelivers. Apply the levers as a stack. **When advising a user, lead with caching and context before model routing** — that's where the money is.
 
-## Verified pricing (per MTok, USD — as of 2026-07-11; confirm before quoting)
+## Verified pricing (per MTok, USD — verified 2026-09-21; confirm before quoting)
 
-| Model | Input | Output | Cache read (0.1x) | 5-min write (1.25x) | 1-hr write (2x) |
-|-------|-------|--------|-------------------|---------------------|-----------------|
+**Current lineup — these are what `routing.yaml` routes to:**
+
+| Model | Input | Output | Cache read | 5-min write (1.25x) | 1-hr write (2x) |
+|-------|-------|--------|------------|---------------------|-----------------|
 | Haiku 4.5 (`claude-haiku-4-5`) | $1.00 | $5.00 | $0.10 | $1.25 | $2.00 |
-| Sonnet 5 (`claude-sonnet-5`) | $3.00* | $15.00* | $0.30 | $3.75 | $6.00 |
-| Sonnet 4.6 (`claude-sonnet-4-6`) | $3.00 | $15.00 | $0.30 | $3.75 | $6.00 |
-| Opus 4.8 (`claude-opus-4-8`) | $5.00 | $25.00 | $0.50 | $6.25 | $10.00 |
-| Fable 5 (`claude-fable-5`) | $10.00 | $50.00 | $1.00 | $12.50 | $20.00 |
+| Sonnet 5 (`claude-sonnet-5`) | $2.00 | $10.00 | $0.20 | $2.50 | $4.00 |
+| Opus 5 (`claude-opus-5`) | $5.00 | $25.00 | $0.50 | $6.25 | $10.00 |
+| Fable 5.1 (`claude-fable-5-1`) | $10.00 | $50.00 | **$0.25** † | $12.50 | $20.00 |
 
-\* **Sonnet 5 intro pricing is $2/$10 through 2026-08-31, reverting to $3/$15 on 2026-09-01.** `routing.yaml` hardcodes the *standard* rate deliberately, so budgets don't blow out in September. Flip to the intro rate only if you mean to.
+**Legacy (still served, pinned in `routing.yaml` but not routed to):** Sonnet 4.6 `claude-sonnet-4-6` $3/$15 · Opus 4.8 `claude-opus-4-8` $5/$25 · Fable 5 `claude-fable-5` $10/$50.
+
+† **Fable 5.1 cache reads are 0.025x base input, not the usual 0.1x.** Every other model reads at 0.1x. `routing.yaml` carries this as a per-model `cache_read_mult`, honored in `router.py`. Cache *write* multipliers are assumed standard (1.25x / 2x) — that half is not separately confirmed.
 
 Output is 5x input on every tier. Batch API = 50% off input and output, and stacks with caching (a cached batch request can land near 5% of the standard non-cached cost).
 
-**Two things that will bite you if ignored:**
-- **Fable 5 is $10/$50 — 2x Opus in both directions.** A misroute here is the single most expensive mistake the router can make. It is reachable only by explicit signal or the `final_arbiter` role; `cost_guards.require_explicit_routing` blocks escalation from drifting into it. Do not remove that guard.
-- **Sonnet 5 uses a new tokenizer (1.0–1.35x more tokens for the same text).** Since caching depends on byte-identical prefixes and token counts, **re-benchmark cache-hit rates and per-call token counts before migrating cached-prefix workloads onto it.** `sonnet_4_6` is kept as a pinned fallback with known-stable counts.
+**Four things that will bite you if ignored:**
+- **Sonnet 5 is $2/$10 permanently.** The scheduled 2026-09-01 reversion to $3/$15 was **cancelled on 2026-08-10** — introductory pricing became the standard rate. Older copies of this skill (and `routing.yaml` v1) hardcoded $3/$15 defensively against that reversion and overstated every Sonnet estimate by 50%. If you see $3/$15 for Sonnet 5 anywhere, that source is stale.
+- **The Haiku→Sonnet gap is 2x, not 3x.** Sonnet 5 at $2/$10 is only double Haiku. The cheap-tier savings are smaller than they look, and judged *per completed task* a Haiku call that needs a Sonnet retry is already a loss. Don't push marginal work down to Haiku on reflex.
+- **Fable 5.1 is $10/$50 — 2x Opus in both directions.** A misroute here is the single most expensive mistake the router can make. It is reachable only by explicit signal or the `final_arbiter` role; `cost_guards.require_explicit_routing` blocks escalation from drifting into it. Do not remove that guard. It also has breaking API differences (thinking always on, forced `tool_choice` returns 400, no prefill, 30-day retention required).
+- **Sonnet 5 uses a new tokenizer (1.0–1.35x more tokens for the same text).** Since caching depends on byte-identical prefixes and token counts, **re-benchmark cache-hit rates and per-call token counts before migrating cached-prefix workloads onto it.** `sonnet_4_6` is kept as a pinned fallback with known-stable counts — but note it now costs *more* than Sonnet 5, so pin it for token stability, never for cost.
 
-Mythos 5 shares Fable's underlying model but is trusted-access only (Project Glasswing) — not publicly routable. These rates change; re-verify before committing budget.
+**Cache-namespace warning (the most important caveat in this skill).** Prompt caches are **model-scoped**. Every tier hop is a guaranteed cache miss on the shared prefix — the routed call pays full input price to rebuild a prefix the previous tier already had warm. On an input-heavy agent loop, the cache you lose by hopping tiers can exceed the per-token spread you gained. **Before adding a tier hop to save money, measure the simpler alternative first: one model at lower `effort`, keeping a single warm cache namespace.** Lower effort on a current model often matches or beats a prior-generation model at high effort.
+
+**Effort is a lever this router does not price.** `output_config.effort` (`low`→`max`, default `high`) changes token *volume*, not per-token rate, so it never shows up in `estimate_cost()` — but it is the first quality-trading lever after caching and is usually cheaper to reach for than a tier change. `routing.yaml` carries an `effort:` block with per-role defaults. Haiku 4.5 does not support effort at all.
+
+Mythos 5.1 shares Fable's underlying model but is trusted-access only (Project Glasswing) — not publicly routable. These rates change; re-verify before committing budget.
 
 ## Tier definitions — route by complexity, not topic
 

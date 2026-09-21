@@ -28,7 +28,7 @@ from router import Router
 r = Router("routing.yaml")
 
 decision = r.route("write a FastAPI endpoint for the alert feed")
-# decision.tier == "sonnet"; decision.model_id == "claude-sonnet-4-6"
+# decision.tier == "sonnet"; decision.model_id == "claude-sonnet-5"
 
 # In a swarm, pass the role so a worker stays Haiku regardless of phrasing:
 decision = r.route("analyze this host's processes", role="worker")
@@ -87,9 +87,9 @@ The router is plain Python with one dependency (PyYAML), so it drops into an MCP
 
 Misroutes show up as escalations. If a class of task keeps escalating from Haiku to Sonnet, its signals belong under `sonnet`, not `haiku`. If Opus calls rarely change the outcome versus a Sonnet retry, tighten the `opus` signals. The config is meant to drift toward your actual workload over time.
 
-## Fable 5 and the escalation guard (read before touching `tier_order`)
+## Fable 5.1 and the escalation guard (read before touching `tier_order`)
 
-Fable 5 ($10/$50) returned to general availability on 2026-07-01. It sits at the top of `tier_order`, but **escalation deliberately cannot reach it.** `cost_guards.require_explicit_routing: [fable]` makes `next_tier_on_failure()` stop at Opus and return `None`.
+Fable 5.1 (`claude-fable-5-1`, $10/$50) sits at the top of `tier_order`, but **escalation deliberately cannot reach it.** `cost_guards.require_explicit_routing: [fable]` makes `next_tier_on_failure()` stop at Opus and return `None`.
 
 That asymmetry is the whole point. Escalation is driven by a validator, and validators are flaky — a bad confidence signal or a brittle schema check can fail repeatedly. Without the guard, a 250-token Haiku grunt task could walk haiku → sonnet → opus → fable and bill 10x for work that never needed it. Cheap tiers should fail upward freely; the expensive one should require you to mean it.
 
