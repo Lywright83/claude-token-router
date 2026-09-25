@@ -63,8 +63,11 @@ def analyze(r: Router, rows: list[dict]) -> None:
 
     for row in rows:
         tier = row["tier"]
+        # Price at the model that actually served the call (e.g. an Opus 5.5
+        # refusal that fell back to Opus 5), bucketed under its tier.
+        price_key = r.key_for_model_id(row.get("model")) or tier
         est = r.estimate_cost(
-            tier,
+            price_key,
             input_tokens=row.get("input_tokens", 0),
             output_tokens=row.get("output_tokens", 0),
             cached_input_tokens=row.get("cached_input_tokens", 0),

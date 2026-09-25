@@ -41,6 +41,12 @@ class RouteDecision:
     reason: str
     matched_signals: list = field(default_factory=list)
     batch_eligible: bool = False
+    # output_config.effort to send (None when the model doesn't support it,
+    # e.g. Haiku 4.5). On always-thinking models (Opus 5.5, Fable 5.1) effort
+    # is the only cost/latency dial, so callers should always send it.
+    effort: Optional[str] = None
+    # Model id to fall back to on refusal/outage, if the entry names one.
+    fallback_model_id: Optional[str] = None
 
 
 @dataclass
@@ -58,11 +64,15 @@ class Router:
         # Resolve relative to the repo root (parent of scripts/) so the scripts
         # work whether you run them from the root or from inside scripts/.
         # An absolute path, or one that exists as given, is used as-is.
+        # Stacks that vendor this file often keep the YAML in config/, so that
+        # is checked too.
         p = Path(config_path)
         if not p.is_absolute() and not p.exists():
-            candidate = Path(__file__).resolve().parent.parent / config_path
-            if candidate.exists():
-                p = candidate
+            root = Path(__file__).resolve().parent.parent
+            for candidate in (root / config_path, root / "config" / config_path):
+                if candidate.exists():
+                    p = candidate
+                    break
         with open(p, "r") as f:
             self.cfg = yaml.safe_load(f)
         self.models = self.cfg["models"]
@@ -70,6 +80,42 @@ class Router:
         self.mult = self.cfg["multipliers"]
         self.tier_order = self.cfg["tier_order"]
         self.default_tier = self.cfg.get("default_tier", "sonnet")
+
+    def effort_for(self, tier: str, role: Optional[str] = None) -> Optional[str]:
+        """Effort to send: the role's effort, else the model's own `effort`,
+        else effort.default. None if the model doesn't support effort."""
+        m = self.models[tier]
+        if m.get("effort_supported") is False:
+            return None
+        ecfg = self.cfg.get("effort", {})
+        by_role = ecfg.get("by_role", {})
+        if role and role in by_role:
+            return by_role[role]
+        return m.get("effort") or ecfg.get("default")
+
+    def _decision(
+        self, tier: str, reason: str, matched: Optional[list] = None, role: Optional[str] = None
+    ) -> RouteDecision:
+        """Build a decision carrying effort and fallback, so callers never have
+        to re-read the YAML to call the model correctly."""
+        m = self.models[tier]
+        fb = m.get("fallback")
+        return RouteDecision(
+            tier=tier,
+            model_id=m["id"],
+            reason=reason,
+            matched_signals=matched or [],
+            effort=self.effort_for(tier, role),
+            fallback_model_id=self.models[fb]["id"] if fb in self.models else None,
+        )
+
+    def key_for_model_id(self, model_id: Optional[str]) -> Optional[str]:
+        """Map a model id (e.g. from a usage log) back to its models: key, so a
+        call served by a fallback is priced at the model that actually ran."""
+        for key, m in self.models.items():
+            if m.get("id") == model_id:
+                return key
+        return None
 
     # -- classification -----------------------------------------------------
     def classify(self, task: str) -> RouteDecision:
@@ -86,17 +132,8 @@ class Router:
                 best_tier = tier
                 best_matches = sigs
         if best_tier is None:
-            return RouteDecision(
-                tier=self.default_tier,
-                model_id=self.models[self.default_tier]["id"],
-                reason="no signal matched; using default tier",
-            )
-        return RouteDecision(
-            tier=best_tier,
-            model_id=self.models[best_tier]["id"],
-            reason=f"matched {best_tier} signals",
-            matched_signals=best_matches,
-        )
+            return self._decision(self.default_tier, "no signal matched; using default tier")
+        return self._decision(best_tier, f"matched {best_tier} signals", best_matches)
 
     def is_batch_eligible(self, task: str) -> bool:
         bcfg = self.cfg.get("batch", {})
@@ -112,11 +149,7 @@ class Router:
             roles = self.cfg.get("swarm", {}).get("roles", {})
             if role in roles:
                 tier = roles[role]
-                d = RouteDecision(
-                    tier=tier,
-                    model_id=self.models[tier]["id"],
-                    reason=f"swarm role '{role}' -> {tier}",
-                )
+                d = self._decision(tier, f"swarm role '{role}' -> {tier}", role=role)
                 d.batch_eligible = self.is_batch_eligible(task)
                 return d
         d = self.classify(task)
@@ -125,11 +158,8 @@ class Router:
 
     def route_at_tier(self, tier: str) -> RouteDecision:
         """Force a decision at a specific tier (used after escalation)."""
-        return RouteDecision(
-            tier=tier,
-            model_id=self.models[tier]["id"],
-            reason=f"forced tier '{tier}' (escalation)",
-        )
+        return self._decision(tier, f"forced tier '{tier}' (escalation)")
+
     def next_tier_on_failure(
         self, current_tier: str, validation_passed: bool, confidence: float = 1.0
     ) -> Optional[str]:
@@ -244,7 +274,8 @@ if __name__ == "__main__":
     print("ROUTING:")
     for task, role in samples:
         d = r.route(task, role=role)
-        print(f"  [{d.tier:6}] batch={d.batch_eligible!s:5} {task[:46]!r}")
+        print(f"  [{d.tier:6}] {d.model_id:18} effort={d.effort or '-':6} "
+              f"batch={d.batch_eligible!s:5} {task[:46]!r}")
 
     print("\nESCALATION GUARD (fable must NOT be reachable by drift):")
     for tier in ["haiku", "sonnet", "opus", "fable"]:

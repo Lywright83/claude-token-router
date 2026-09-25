@@ -2,10 +2,10 @@
 # Edit this to retune routing without touching router.py.
 # Verify pricing against the official pricing page before trusting cost output.
 
-version: 2
-updated: 2026-09-21
-# Verified 2026-09-21 against platform.claude.com models overview + Sonnet 5
-# pricing announcement. Three corrections vs v1 (see CHANGELOG at end of file).
+version: 3
+updated: 2026-09-25
+# v3: opus tier -> Opus 5.5 ($4/$20, 0.05x cache reads); orchestrator role ->
+# opus. Fable rule unchanged. See CHANGELOG at end of file.
 
 # ---------------------------------------------------------------------------
 # Models: ids, per-MTok pricing, and cache/batch multipliers.
@@ -55,17 +55,45 @@ models:
     status: legacy
 
   opus:
-    # Was claude-opus-4-8 in v1. Opus 5 is the current Opus-tier model at the
-    # SAME price, so this retarget changes no cost math — only the model ID.
+    # v3: claude-opus-5 -> claude-opus-5-5. CHEAPER and stronger: $4/$20 vs
+    # $5/$25, and cache reads $0.20 = 0.05x input (vs 0.1x on Opus 5). At its
+    # default effort it matches or beats Opus 5 at high effort in fewer tokens,
+    # so cost per SOLVED task falls further than the 20% list-price cut.
+    id: claude-opus-5-5
+    input_per_mtok: 4.00
+    output_per_mtok: 20.00
+    context_tokens: 1000000
+    max_output_tokens: 128000
+    cache_read_mult: 0.05       # $0.20/MTok; the global 0.1x would overstate 2x
+    effort_supported: true      # low|medium|high|xhigh|max, default MEDIUM
+    effort: medium              # set explicitly: API default dropped from high
+    thinking_mode: always_on    # thinking disabled / budget_tokens both 400
+    fallback: opus_5            # refusal / outage fallback target
+    # API differences that will break a request builder written for Opus 5:
+    #   - thinking can't be disabled at ANY effort; effort is the only dial.
+    #     Thinking counts toward max_tokens — size it for thinking + reply.
+    #   - forced tool_choice ("any"/"tool") returns 400 — use "auto" + strict
+    #   - read content by block type: responses usually open with thinking
+    #   - stop_reason "refusal" (cyber / bio / reasoning_extraction): check it
+    #     before reading content; opt into server-side fallbacks
+    #   - computer use only via computer_toolset_20260801
+    #   - thinking blocks are model-bound: a fallback to Opus 5 / 4.8 runs
+    #     without Opus 5.5's reasoning (only Fable 5.1 / Mythos 5.1 read it)
+    # Fast mode (speed:"fast", beta) reprices Opus 5.5 to $8/$40 — 2x. Not
+    # modelled here.
+
+  opus_5:
+    # LEGACY pin — the v2 opus target, and opus's fallback. Now MORE
+    # expensive than Opus 5.5 ($5/$25 vs $4/$20); pin it for continuity, never
+    # for cost.
     id: claude-opus-5
     input_per_mtok: 5.00
     output_per_mtok: 25.00
     context_tokens: 1000000
     max_output_tokens: 128000
-    effort_supported: true      # low|medium|high|xhigh|max, default high
-    thinking_mode: adaptive     # ON BY DEFAULT (unlike Opus 4.8/4.7)
-    # Fast mode (speed:"fast", beta) reprices Opus 5 to $10/$50 — 2x. It is
-    # NOT modelled here. If you enable it, you are paying Fable rates.
+    effort_supported: true
+    thinking_mode: adaptive
+    status: legacy
 
   opus_4_8:
     # LEGACY pin — the v1 opus target. Same price as Opus 5.
@@ -107,7 +135,8 @@ models:
     status: legacy
 
 # Multipliers applied to base input price. These stack with batch.
-# A model may override cache_read via its own `cache_read_mult` (Fable 5.1).
+# A model may override cache_read via its own `cache_read_mult` (Opus 5.5,
+# Fable 5.1).
 multipliers:
   cache_read: 0.10      # cache hit: 90% off input (default; per-model override)
   cache_write_5m: 1.25  # 5-minute TTL write
@@ -119,6 +148,8 @@ multipliers:
 # (default 1), so a haiku task will NOT silently walk all the way to fable —
 # that would be an expensive surprise. Fable is normally reached by explicit
 # routing (signals / role), not by escalation drift.
+# FABLE RULE (unchanged in v3 — this is paid API usage): escalation stops at
+# opus. cost_guards.require_explicit_routing keeps fable opt-in only.
 tier_order: [haiku, sonnet, opus, fable]
 
 # ---------------------------------------------------------------------------
@@ -212,7 +243,7 @@ rules:
 
   fable:
     description: >
-      Frontier tier ($10/$50 — 2x Opus input, 2x Opus output). Only for work
+      Frontier tier ($10/$50 — 2.5x Opus 5.5 in both directions). Only for work
       where the extra capability materially changes the OUTCOME, not merely the
       polish. If an Opus retry would plausibly get there, use Opus. Requires an
       explicit signal or role; never the default.
@@ -283,14 +314,18 @@ batch:
 # ---------------------------------------------------------------------------
 swarm:
   roles:
-    planner: opus         # or sonnet for cheaper orchestration
-    orchestrator: sonnet
+    planner: opus
+    # v3: sonnet -> opus. Opus 5.5 is only 2x Sonnet 5 per token and needs
+    # fewer turns; for orchestration that decides what everything else does,
+    # a cheaper misjudgment costs more than the spread. Drop back to sonnet
+    # only if cost_report.py shows opus orchestration not changing outcomes.
+    orchestrator: opus
     worker: haiku         # repetitive fan-out grunts
     reviewer: opus        # final-pass quality gate
     final_arbiter: fable  # ONLY for irreversible/expensive calls. Use sparingly.
 
 # ---------------------------------------------------------------------------
-# Cost guardrails. Fable is 10x haiku on input and 10x on output — a runaway
+# Cost guardrails. Fable is 10x haiku and 2.5x opus (5.5) — a runaway
 # loop here is the failure mode that actually hurts. These are advisory limits
 # the router surfaces; enforce them in your orchestrator.
 # ---------------------------------------------------------------------------
@@ -311,7 +346,8 @@ cost_guards:
 # Haiku 4.5 does not support effort at all.
 # ---------------------------------------------------------------------------
 effort:
-  default: high          # matches the API default on Opus 5 / Sonnet 5 / Fable
+  default: high          # API default on Sonnet 5 / Fable. NOT Opus 5.5 (medium) —
+                         # a model's own `effort:` wins over this default
   by_role:
     worker: low          # subagents, bulk extraction, simple fan-out
     orchestrator: medium
@@ -341,7 +377,7 @@ cache_namespace:
     save money, measure the simpler alternative first: ONE model at lower
     effort, keeping a single warm cache namespace.
     Corollary: a mid-conversation top-level `effort` change also invalidates
-    the messages cache. On Opus 5 / Fable 5.1, use the per-message effort
+    the messages cache. On Opus 5 / Opus 5.5 / Fable 5.1, use the per-message effort
     system message to change effort WITHOUT a cache reset.
   # Check this before trusting any savings number from cost_report.py.
   verify_with: usage.cache_read_input_tokens
@@ -349,6 +385,17 @@ cache_namespace:
 # ---------------------------------------------------------------------------
 # CHANGELOG
 # ---------------------------------------------------------------------------
+# v3 (2026-09-25)
+#   1. opus: claude-opus-5 -> claude-opus-5-5. $5/$25 -> $4/$20; cache reads
+#      0.1x -> 0.05x ($0.20). Thinking always on, effort default medium (set
+#      explicitly via the new per-model `effort`). claude-opus-5 kept as the
+#      legacy `opus_5` pin and opus's `fallback`.
+#   2. swarm.roles.orchestrator: sonnet -> opus. The Opus/Sonnet gap narrowed
+#      from 2.5x to 2x.
+#   3. Fable rule unchanged: explicit routing only, escalation stops at opus.
+#      Fable is now 2.5x opus (was 2x), so the guard saves more.
+#   router.py: RouteDecision carries effort + fallback_model_id;
+#   key_for_model_id() prices log rows at the model that served them.
 # v2 (2026-09-21) — verified against platform.claude.com. Corrections:
 #   1. sonnet: $3/$15 -> $2/$10. The 2026-09-01 reversion was cancelled
 #      2026-08-10; intro pricing became permanent. v1 overstated every

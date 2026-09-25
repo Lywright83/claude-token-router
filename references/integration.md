@@ -87,6 +87,17 @@ The router is plain Python with one dependency (PyYAML), so it drops into an MCP
 
 Misroutes show up as escalations. If a class of task keeps escalating from Haiku to Sonnet, its signals belong under `sonnet`, not `haiku`. If Opus calls rarely change the outcome versus a Sonnet retry, tighten the `opus` signals. The config is meant to drift toward your actual workload over time.
 
+## Opus 5.5 request shape (read before wiring the opus tier)
+
+The opus tier is `claude-opus-5-5`. Its request surface differs from Opus 5 in ways that 400 a shared request builder:
+
+- **Thinking is always on.** Omit `thinking` (or send `{"type": "adaptive"}`); `{"type": "disabled"}` and `budget_tokens` 400 at every effort level. Send `output_config: {"effort": d.effort}` — `RouteDecision.effort` carries the model's `effort` (or the role's, from `effort.by_role`). The API default is `medium`, one level below Opus 5.
+- **Size `max_tokens` for thinking plus the reply** — thinking counts toward it.
+- **Read content by block type**, not `content[0]`: responses usually open with a (possibly empty) `thinking` block.
+- **Forced `tool_choice` (`any` / `tool`) 400s.** Use `auto` plus `strict: true` tools, or structured outputs.
+- **Refusals** arrive as HTTP 200 with `stop_reason: "refusal"`. Check it before reading content, and opt into server-side fallbacks (`betas: ["server-side-fallback-2026-07-01"]`, `fallbacks: "default"`). `RouteDecision.fallback_model_id` names the pinned `opus_5` target if you run your own retry. A fallback model runs without Opus 5.5's thinking blocks.
+- **Log the served model** (`response.model`), not the requested one: `cost_report.py` uses `Router.key_for_model_id()` to price a fallback row at the model that actually ran.
+
 ## Fable 5.1 and the escalation guard (read before touching `tier_order`)
 
 Fable 5.1 (`claude-fable-5-1`, $10/$50) sits at the top of `tier_order`, but **escalation deliberately cannot reach it.** `cost_guards.require_explicit_routing: [fable]` makes `next_tier_on_failure()` stop at Opus and return `None`.

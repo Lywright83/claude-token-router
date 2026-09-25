@@ -14,7 +14,7 @@ A model-picking router optimizes *which model* a task goes to. But in an agent l
 
 Cost levers, in order of actual impact:
 
-1. **Prompt caching** — cache reads cost 0.1x base input (0.025x on Fable 5.1). Biggest win for agent loops. Caches are **model-scoped**, so every tier hop is a guaranteed cache miss — price that loss before routing across tiers to save money.
+1. **Prompt caching** — cache reads cost 0.1x base input (0.05x on Opus 5.5, 0.025x on Fable 5.1). Biggest win for agent loops. Caches are **model-scoped**, so every tier hop is a guaranteed cache miss — price that loss before routing across tiers to save money.
 2. **Context discipline** — don't stuff full history into every subagent.
 3. **Tier routing** — the 5–10x spread between Haiku and the top tiers. (Haiku→Sonnet is only 2x; don't push marginal work down on reflex.)
 4. **Batch API** — 50% off async work. Stacks with caching.
@@ -85,16 +85,16 @@ Sample output from the bundled demo (which has two bugs planted in it):
 
 ```
 SPEND BY TIER
-  haiku    28 calls (31.8% vol)  $0.0795 ( 3.4% spend)
-  sonnet   57 calls (64.8% vol)  $1.6976 (71.6% spend)
-  fable     3 calls ( 3.4% vol)  $0.5940 (25.1% spend)
+  haiku    28 calls (31.8% vol)  $0.0795 ( 4.4% spend)
+  sonnet   57 calls (64.8% vol)  $1.1318 (63.3% spend)
+  fable     3 calls ( 3.4% vol)  $0.5760 (32.2% spend)
 
 CACHE HIT RATE: 38.1%
   ! 25 calls (28%) had ZERO cached input.
 
 ESCALATIONS: 32 (36.4% of calls)
   haiku->sonnet   32x
-  Wasted on failed first attempts: $0.0909 (3.8% of spend)
+  Wasted on failed first attempts: $0.0909 (5.1% of spend)
 
 TOP FIX: enable caching on the uncached calls.
 ```
